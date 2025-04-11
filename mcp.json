@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "joongna_crawl": {
+        "command": "/Users/jangseong-won/Desktop/jjang/fastmcp/myenv/bin/python",
+        "args": [
+          "/Users/jangseong-won/Desktop/jjang/fastmcp/joongna_crawl_mcp.py"
+        ]
+      }
+  }
+}
