@@ -1,6 +1,8 @@
 # Python 3.13 기반 이미지 사용
 FROM python:3.13-slim
 
+ARG OPENAI_API_KEY
+
 # 작업 디렉토리 설정
 WORKDIR /app
 
@@ -23,6 +25,7 @@ COPY . .
 # 환경 변수 설정
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
+ENV OPENAI_API_KEY=${OPENAI_API_KEY}
 
 # 포트 노출
 EXPOSE 8000
