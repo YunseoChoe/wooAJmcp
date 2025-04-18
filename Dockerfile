@@ -2,6 +2,9 @@
 FROM python:3.13-slim
 
 ARG OPENAI_API_KEY
+ARG JWT_SECRET_KEY
+ARG MONGODB_URI
+ARG MONGODB_DB_NAME
 
 # 작업 디렉토리 설정
 WORKDIR /app
@@ -26,9 +29,12 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 ENV OPENAI_API_KEY=${OPENAI_API_KEY}
+ENV JWT_SECRET_KEY=${JWT_SECRET_KEY}
+ENV MONGODB_URI=${MONGODB_URI}
+ENV MONGODB_DB_NAME=${MONGODB_DB_NAME}
 
 # 포트 노출
 EXPOSE 8000
 
 # 서버 실행
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
