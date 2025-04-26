@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   web:
+    platform: linux/amd64
     build: .
     ports:
       - "8000:8000"

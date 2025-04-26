@@ -15,6 +15,9 @@ from dotenv import load_dotenv
 from jwt import PyJWT
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
+from datetime import timedelta
+
+import requests
 
 jwt_decoder = PyJWT()
 
@@ -26,6 +29,8 @@ print("환경 변수 로드 완료")
 JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
 if not JWT_SECRET_KEY:
     raise ValueError("JWT_SECRET_KEY 환경 변수가 설정되지 않았습니다.")
+
+KAKAO_API_KEY = os.getenv("KAKAO_API_KEY")
 
 # MongoDB 설정
 MONGODB_URI = os.getenv('MONGODB_URI')
@@ -76,6 +81,16 @@ class ChatResponse(BaseModel):
     response: str
     tool_calls: List[str] = []
 
+
+# 토큰 요청을 위한 데이터 모델
+class TokenRequest(BaseModel):
+    user_id: str
+
+# 토큰 응답을 위한 데이터 모델
+class TokenResponse(BaseModel):
+    token: str
+    user_id: str
+
 # MCP 서버 설정 (타임아웃 추가)
 async def setup_mcp_servers():
     servers = []
@@ -110,9 +125,62 @@ async def setup_mcp_servers():
         
     return servers
 
+def check_kakao_api_status():
+    """
+    카카오맵 API 연결 상태를 확인합니다.
+    
+    Returns:
+        bool: API가 정상 작동하면 True, 그렇지 않으면 False
+    """
+    try:
+        if not KAKAO_API_KEY:
+            print("KAKAO_API_KEY가 설정되지 않았습니다.")
+            return False
+            
+        # 간단한 테스트 요청 (서울시청 좌표로 주소 조회)
+        url = "https://dapi.kakao.com/v2/local/geo/coord2address.json"
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        params = {
+            "x": 126.9769930,  # 서울시청 경도
+            "y": 37.5662952    # 서울시청 위도
+        }
+        
+        response = requests.get(url, headers=headers, params=params, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("documents"):
+                print("카카오맵 API 연결 성공")
+                return True
+            else:
+                print("카카오맵 API 응답 형식 오류: 데이터가 없습니다.")
+                return False
+        else:
+            print(f"카카오맵 API 응답 오류: 상태 코드 {response.status_code}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        print("카카오맵 API 연결 타임아웃")
+        return False
+    except requests.exceptions.ConnectionError:
+        print("카카오맵 API 연결 실패")
+        return False
+    except Exception as e:
+        print(f"카카오맵 API 상태 확인 중 오류 발생: {str(e)}")
+        return False
+
 # 에이전트 설정
 async def setup_agent():
     print("에이전트 설정 시작...")
+    
+    # 카카오맵 API 상태 확인
+    kakao_api_available = check_kakao_api_status()
+    
+    # API 연결이 안 되면 에이전트 설정 실패
+    if not kakao_api_available:
+        print("카카오맵 API 연결 실패로 에이전트 설정을 중단합니다.")
+        return None, []
+
     # MCP 서버 설정
     try:
         mcp_servers = await setup_mcp_servers()
@@ -121,6 +189,13 @@ async def setup_agent():
             name="Assistant",
             instructions="""
         너는 중고 구매를 도와주는 에이전트야.
+        
+        다음 도구들을 가능한 한 적극적으로 활용해야 해:
+        
+        get_midpoint_facilities: 두 지역 사이의 중간 지점을 찾고 주변 시설을 검색할 때 사용해야 함.
+           - 사용자가 위치, 장소, 지역, 중간 지점, 만날 장소 등에 대해 질문할 때 항상 이 도구를 사용하세요.
+           - 예: "서울역과 강남역 사이 중간에 만날 만한 카페 추천해줘"와 같은 질문에 반드시 사용
+           - 지역 관련 질문이 있을 때는 추측하지 말고 반드시 이 도구를 통해 정확한 정보를 제공하세요.
         """,
             model="gpt-4o-mini",
             mcp_servers=mcp_servers
@@ -174,6 +249,8 @@ async def lifespan(app: FastAPI):
     if mcp_servers_global:
         for server in mcp_servers_global:
             try:
+                if hasattr(server, '_closed') and server._closed:
+                    continue
                 await server.__aexit__(None, None, None)
                 print("MCP 서버 연결 종료")
             except Exception as e:
@@ -196,6 +273,31 @@ client = OpenAI()
 
 # 저장소
 chat_histories = {}  # user_id -> chat_history
+
+# JWT 토큰 생성 엔드포인트
+@app.post("/api/token", response_model=TokenResponse)
+async def generate_token(token_request: TokenRequest):
+    """
+    user_id를 포함한 JWT 토큰을 생성합니다.
+    이 엔드포인트는 요청 본문에서 user_id를 받아 JWT 토큰을 반환합니다.
+    """
+    try:
+        user_id = token_request.user_id
+        
+        # user_id와 만료 시간(24시간)이 포함된 페이로드 생성
+        payload = {
+            "user_id": user_id,
+            "exp": datetime.utcnow() + timedelta(hours=24)
+        }
+        
+        # JWT 토큰 인코딩
+        token = jwt_decoder.encode(payload, JWT_SECRET_KEY, algorithm="HS256")
+        
+        return TokenResponse(token=token, user_id=user_id)
+    
+    except Exception as e:
+        print(f"토큰 생성 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"토큰 생성 중 오류 발생: {str(e)}")
 
 # REST API 엔드포인트 - 채팅 메시지 처리
 @app.post("/api/chat", response_model=ChatResponse)
@@ -268,15 +370,12 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-async def get_token_from_header(websocket: WebSocket) -> str:
-    """웹소켓 헤더에서 JWT 토큰을 추출합니다."""
-    headers = dict(websocket.headers)
-    auth_header = headers.get('authorization')
-    
-    if not auth_header or not auth_header.startswith('Bearer '):
-        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason="인증 토큰이 없습니다.")
-    
-    return auth_header.split(' ')[1]
+async def get_token_from_header(websocket: WebSocket):
+    # URL에서 토큰 파라미터 추출
+    token = websocket.query_params.get('token')
+    if not token:
+        raise WebSocketDisconnect(reason="Missing token")
+    return token
 
 async def verify_token(token: str) -> str:
     """JWT 토큰을 검증하고 user_id를 반환합니다."""
@@ -410,11 +509,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"에이전트 응답 생성 완료: {client_user_id}")
                     
                     # 로컬 MCP 서버 정리
-                    for server in local_mcp_servers:
-                        try:
-                            await server.__aexit__(None, None, None)
-                        except Exception as e:
-                            print(f"MCP 서버 정리 중 오류: {str(e)}")
+                    try:
+                        if local_mcp_servers:
+                            for server in local_mcp_servers:
+                                if hasattr(server, '_closed') and server._closed:
+                                    continue
+                                # 여기서 직접 cleanup 호출    
+                                if hasattr(server, 'cleanup'):
+                                    await server.cleanup()
+                                else:
+                                    # 또는 안전하게 닫기
+                                    await asyncio.shield(server.__aexit__(None, None, None))
+                    except Exception as e:
+                        print(f"MCP 서버 정리 중 오류: {str(e)}")
                         
                 except Exception as e:
                     error_message = f"에이전트 처리 중 오류 발생: {str(e)}"
@@ -560,11 +667,19 @@ async def group_websocket_endpoint(websocket: WebSocket, room_num: str):
                     print(f"그룹 에이전트 응답 생성 완료: 방 {room_num}")
                     
                     # 로컬 MCP 서버 정리
-                    for server in local_mcp_servers:
-                        try:
-                            await server.__aexit__(None, None, None)
-                        except Exception as e:
-                            print(f"그룹 MCP 서버 정리 중 오류: {str(e)}")
+                    try:
+                        if local_mcp_servers:
+                            for server in local_mcp_servers:
+                                if hasattr(server, '_closed') and server._closed:
+                                    continue
+                                # 여기서 직접 cleanup 호출    
+                                if hasattr(server, 'cleanup'):
+                                    await server.cleanup()
+                                else:
+                                    # 또는 안전하게 닫기
+                                    await asyncio.shield(server.__aexit__(None, None, None))
+                    except Exception as e:
+                        print(f"MCP 서버 정리 중 오류: {str(e)}")
                         
                 except Exception as e:
                     error_message = f"그룹 에이전트 처리 중 오류 발생: {str(e)}"
@@ -597,7 +712,16 @@ async def group_websocket_endpoint(websocket: WebSocket, room_num: str):
 async def close_mcp_servers(servers):
     for server in servers:
         try:
-            await server.__aexit__(None, None, None)
+            # 서버가 이미 종료되었는지 확인
+            if hasattr(server, '_closed') and server._closed:
+                continue
+                
+            # 대신 cleanup 메서드를 직접 호출
+            if hasattr(server, 'cleanup'):
+                await server.cleanup()
+            else:
+                # 또는 안전하게 닫기
+                await asyncio.shield(server.__aexit__(None, None, None))
         except Exception as e:
             print(f"MCP 서버 종료 오류: {str(e)}")
 

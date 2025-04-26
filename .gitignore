@@ -1,2 +1,5 @@
 .env
 run.sh
+run2.sh
+fileload.txt
+test.py

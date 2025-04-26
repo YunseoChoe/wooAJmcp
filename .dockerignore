@@ -12,3 +12,4 @@ myenv/
 *.log
 .DS_Store 
 run.sh
+run2.sh

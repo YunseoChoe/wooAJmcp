@@ -1,1 +1,51 @@
-"/app/joongna_crawl_mcp.py"
+{
+  "mcpServers": {
+    "joongna_crawl": {
+        "command": "python",
+        "args": [
+          "/app/joongna_crawl_mcp.py"
+        ]
+      }
+  }
+}
+
+
+{
+  "mcpServers": {
+    "joongna_crawl": {
+        "command": "/Users/jangseong-won/Desktop/jjang/fastmcp/myenv/bin/python",
+        "args": [
+          "/Users/jangseong-won/Desktop/jjang/fastmcp/joongna_crawl_mcp.py"
+        ]
+      }
+  }
+}
+
+
+sudo docker pull jjang6251/wooajung:latest
+sudo docker run -d -p 8000:8000 --name wooajung-container jjang6251/wooajung
+
+
+sudo docker rm wooajung-container
+sudo docker rmi jjang6251/wooajung
+
+sudo docker logs wooajung-container
+
+
+
+
+## /etc/nginx/sites-enabled/default
+location / {
+        proxy_pass http://app;
+        proxy_http_version 1.1;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        # 웹소켓 지원을 위한 설정
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;     # 웹소켓 연결 타임아웃(24시간)
+        
+        client_max_body_size 11M;
+}

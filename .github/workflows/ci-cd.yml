@@ -1,0 +1,42 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Login Dockerhub
+      
+      run: docker login -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_PASSWORD }}      
+
+    - name: Build the Docker image
+      run: |
+        docker build --build-arg OPENAI_API_KEY='${{secrets.OPENAI_API_KEY}}' --build-arg JWT_SECRET_KEY='${{secrets.JWT_SECRET_KEY}}' --build-arg MONGODB_URI='${{secrets.MONGODB_URI}}' --build-arg MONGODB_DB_NAME='${{secrets.MONGODB_DB_NAME}}' -t wooajung .
+
+    - name: taging
+      run: docker tag tripmate:latest ${{ secrets.DOCKERHUB_USERNAME }}/wooajung:latest
+
+    - name: Push to Dockerhub
+      run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/wooajung:latest
+    
+  deploy:
+
+    runs-on: self-hosted
+    needs: build
+
+    steps:
+    - name: Pull Docker image
+      run: sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/wooajung:latest
+    - name: Delete Old docker container
+      run: sudo docker rm -f wooajung-container || true
+    - name: Run Docker Container
+      run: sudo docker run -d -p 3000:3000 --name wooajung-container ${{ secrets.DOCKERHUB_USERNAME }}/wooajung

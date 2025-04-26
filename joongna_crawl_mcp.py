@@ -6,6 +6,15 @@ import os
 import time
 from typing import Dict, List, Optional
 from collections import defaultdict
+from dotenv import load_dotenv
+import requests
+import math
+from pydantic import BaseModel
+
+# .env 파일에서 환경 변수 불러오기
+load_dotenv()
+
+KAKAO_API_KEY = os.getenv("KAKAO_API_KEY")
 
 # 캐시 데이터 관리를 위한 클래스
 class CacheManager:
@@ -42,7 +51,7 @@ class CacheManager:
 cache_manager = CacheManager()
 
 # Create an MCP server
-mcp = FastMCP("joongna_crawler_server")
+mcp = FastMCP("joongo_server")
 
 # 외부 크롤러 스크립트를 위한 코드
 # 이 스크립트는 별도 파일로 저장하여 subprocess로 실행합니다
@@ -339,6 +348,531 @@ def clear_cache(keyword: str = None) -> Dict:
         cache_manager.cache.clear()
         cache_manager.last_accessed.clear()
         return {"success": True, "message": "모든 캐시가 삭제되었습니다."}
+
+# ----------------------------------------------------------------
+
+class Location(BaseModel):
+    name: str
+    latitude: float
+    longitude: float
+
+class POI(BaseModel):
+    name: str
+    address: str
+    category: str
+    latitude: float
+    longitude: float
+    distance: float  # 중간 지점으로부터의 거리 (미터)
+
+class SearchResponse(BaseModel):
+    midpoint: Location
+    facilities: List[POI]
+
+class MidGeoRequest(BaseModel):
+    geo1: str
+    geo2: str
+
+class MidGeoResponse(BaseModel):
+    first: str
+    second: str
+
+class MidpointFacilitiesRequest(BaseModel):
+    geo1: str
+    geo2: str
+    facility_types: Optional[List[str]] = None
+    radius: int = 1000
+    
+
+
+def get_coordinates(location_name: str) -> tuple:
+    """
+    장소 이름으로부터 좌표(위도, 경도)를 얻습니다.
+    """
+    if KAKAO_API_KEY:
+        # Kakao Maps API 사용
+        url = "https://dapi.kakao.com/v2/local/search/address.json"
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        params = {"query": location_name}
+        
+        response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+        
+        if response.status_code != 200 or not data.get("documents"):
+            # 주소 검색 실패 시 키워드 검색으로 시도
+            url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+            response = requests.get(url, headers=headers, params=params)
+            data = response.json()
+            
+            if response.status_code != 200 or not data.get("documents"):
+                raise ValueError(f"위치를 찾을 수 없습니다: {location_name}")
+        
+        # 첫 번째 결과 사용
+        first_result = data["documents"][0]
+        latitude = float(first_result.get("y"))
+        longitude = float(first_result.get("x"))
+        
+        # 첫 번째 결과 사용
+        location = data["results"][0]["geometry"]["location"]
+        latitude = location["lat"]
+        longitude = location["lng"]
+    else:
+        raise ValueError("API 키가 설정되지 않았습니다. Kakao 또는 Google Maps API 키를 설정해주세요.")
+    
+    return latitude, longitude
+
+def calculate_midpoint(lat1: float, lon1: float, lat2: float, lon2: float) -> tuple:
+    """
+    두 좌표 간의 중간 지점을 계산합니다.
+    """
+    # 라디안으로 변환
+    lat1_rad = math.radians(lat1)
+    lon1_rad = math.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+    
+    # 중간 지점 계산
+    bx = math.cos(lat2_rad) * math.cos(lon2_rad - lon1_rad)
+    by = math.cos(lat2_rad) * math.sin(lon2_rad - lon1_rad)
+    
+    lat3_rad = math.atan2(
+        math.sin(lat1_rad) + math.sin(lat2_rad),
+        math.sqrt((math.cos(lat1_rad) + bx) ** 2 + by ** 2)
+    )
+    lon3_rad = lon1_rad + math.atan2(by, math.cos(lat1_rad) + bx)
+    
+    # 도(degree)로 변환
+    lat3 = math.degrees(lat3_rad)
+    lon3 = math.degrees(lon3_rad)
+    
+    return lat3, lon3
+
+def find_nearby_facilities(latitude: float, longitude: float, facility_type: str, radius: int = 1000) -> List[POI]:
+    """
+    지정된 좌표 주변의 시설을 검색합니다.
+    """
+    results = []
+    
+    if KAKAO_API_KEY:
+        # Kakao Local API 사용
+        url = "https://dapi.kakao.com/v2/local/search/category.json"
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        
+        # 카테고리 코드 매핑
+        category_codes = {
+            "police": "PO3",    # 경찰서
+            "subway": "SW8",    # 지하철역
+           # "cafe": "FD6",      # 카페
+           # "restaurant": "FD6", # 음식점
+           # "hospital": "HP8",  # 병원
+           # "bank": "BK9",      # 은행
+           # "store": "MT1",     # 마트
+        }
+        
+        # 카테고리 코드가 없으면 키워드 검색 사용
+        if facility_type in category_codes:
+            params = {
+                "category_group_code": category_codes[facility_type],
+                "x": longitude,
+                "y": latitude,
+                "radius": radius,
+                "sort": "distance"
+            }
+            endpoint = "category.json"
+        else:
+            params = {
+                "query": facility_type,
+                "x": longitude,
+                "y": latitude,
+                "radius": radius,
+                "sort": "distance"
+            }
+            endpoint = "keyword.json"
+            
+        url = f"https://dapi.kakao.com/v2/local/search/{endpoint}"
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            for place in data.get("documents", []):
+                results.append(POI(
+                    name=place.get("place_name"),
+                    address=place.get("address_name"),
+                    category=place.get("category_name"),
+                    latitude=float(place.get("y")),
+                    longitude=float(place.get("x")),
+                    distance=float(place.get("distance"))
+                ))
+    
+    return results
+
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    두 좌표 사이의 거리를 계산합니다 (Haversine 공식 사용).
+    """
+    # 지구 반경 (미터)
+    R = 6371000
+    
+    # 라디안으로 변환
+    lat1_rad = math.radians(lat1)
+    lon1_rad = math.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+    
+    # 위도, 경도 차이
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    
+    # Haversine 공식
+    a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    distance = R * c
+    
+    return distance
+
+def get_address_from_coordinates(longitude, latitude):
+    """
+    카카오 지도 API를 사용해 위도와 경도로부터 주소 정보를 가져옵니다.
+    
+    Args:
+        longitude (float): 경도 값
+        latitude (float): 위도 값
+        api_key (str): 카카오 API 키
+        
+    Returns:
+        dict: 주소 정보가 담긴 딕셔너리
+    """
+    api_key = KAKAO_API_KEY
+    url = "https://dapi.kakao.com/v2/local/geo/coord2address.json"
+    headers = {"Authorization": f"KakaoAK {api_key}"}
+    params = {
+        "x": longitude,  # 경도(x)
+        "y": latitude,   # 위도(y)
+    }
+    
+    response = requests.get(url, headers=headers, params=params)
+    
+    if response.status_code == 200:
+        data = response.json()
+        if data.get("documents"):
+            # 첫 번째 결과 반환
+            return data["documents"][0]["address"]
+        else:
+            return {"error": "해당 좌표에 대한 주소 정보가 없습니다."}
+    else:
+        return {"error": f"API 요청 실패: {response.status_code}"}
+
+# 시설 검색을 더 강력하게 하는 함수
+def find_nearby_facilities_robust(latitude: float, longitude: float, facility_type: str, radius: int = 1000) -> List[POI]:
+    """
+    지정된 좌표 주변의 시설을 검색합니다.
+    여러 방법을 시도하여 시설을 찾지 못하는 경우를 최소화합니다.
+    """
+    results = []
+    
+    if not KAKAO_API_KEY:
+        return results
+    
+    # 카테고리 코드 매핑
+    category_codes = {
+        "경찰서": "PO3",      # 경찰서
+        "지하철역": "SW8",    # 지하철역
+        "공공기관": "PO3",    # 공공기관 (경찰서 코드 사용)
+        "police": "PO3",
+        "subway": "SW8",
+        "public": "PO3",
+    }
+    
+    # 시도 1: 카테고리 검색
+    try:
+        category_code = category_codes.get(facility_type)
+        if category_code:
+            url = "https://dapi.kakao.com/v2/local/search/category.json"
+            headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+            params = {
+                "category_group_code": category_code,
+                "x": longitude,
+                "y": latitude,
+                "radius": radius,
+                "sort": "distance"
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                for place in data.get("documents", []):
+                    results.append(POI(
+                        name=place.get("place_name"),
+                        address=place.get("address_name"),
+                        category=place.get("category_name"),
+                        latitude=float(place.get("y")),
+                        longitude=float(place.get("x")),
+                        distance=float(place.get("distance"))
+                    ))
+    except Exception as e:
+        print(f"카테고리 검색 실패: {str(e)}")
+    
+    # 시도 2: 키워드 검색 (카테고리 검색이 실패했거나 결과가 없는 경우)
+    if not results:
+        try:
+            url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+            headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+            params = {
+                "query": facility_type,
+                "x": longitude,
+                "y": latitude,
+                "radius": radius,
+                "sort": "distance"
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                for place in data.get("documents", []):
+                    results.append(POI(
+                        name=place.get("place_name"),
+                        address=place.get("address_name"),
+                        category=place.get("category_name"),
+                        latitude=float(place.get("y")),
+                        longitude=float(place.get("x")),
+                        distance=float(place.get("distance"))
+                    ))
+        except Exception as e:
+            print(f"키워드 검색 실패: {str(e)}")
+    
+    return results
+
+# 좌표 획득을 더 강력하게 하는 함수
+def get_coordinates_robust(location_name: str) -> tuple:
+    """
+    장소 이름으로부터 좌표(위도, 경도)를 얻습니다.
+    여러 방법을 시도하여 좌표를 얻지 못하는 경우를 최소화합니다.
+    """
+    if not KAKAO_API_KEY:
+        raise ValueError("API 키가 설정되지 않았습니다.")
+    
+    # 시도 1: 주소 검색
+    try:
+        url = "https://dapi.kakao.com/v2/local/search/address.json"
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        params = {"query": location_name}
+        
+        response = requests.get(url, headers=headers, params=params, timeout=5)
+        data = response.json()
+        
+        if response.status_code == 200 and data.get("documents"):
+            first_result = data["documents"][0]
+            latitude = float(first_result.get("y"))
+            longitude = float(first_result.get("x"))
+            return latitude, longitude
+    except Exception as e:
+        print(f"주소 검색 실패: {str(e)}")
+    
+    # 시도 2: 키워드 검색
+    try:
+        url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        params = {"query": location_name}
+        
+        response = requests.get(url, headers=headers, params=params, timeout=5)
+        data = response.json()
+        
+        if response.status_code == 200 and data.get("documents"):
+            first_result = data["documents"][0]
+            latitude = float(first_result.get("y"))
+            longitude = float(first_result.get("x"))
+            return latitude, longitude
+    except Exception as e:
+        print(f"키워드 검색 실패: {str(e)}")
+    
+    # 시도 3: 지역명으로 분할 검색
+    try:
+        # 공백으로 지역명 분할 (예: "서울시 강남구" -> "서울시", "강남구")
+        parts = location_name.split()
+        if len(parts) > 1:
+            # 첫 번째 부분만 사용
+            partial_name = parts[0]
+            
+            url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+            headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+            params = {"query": partial_name}
+            
+            response = requests.get(url, headers=headers, params=params, timeout=5)
+            data = response.json()
+            
+            if response.status_code == 200 and data.get("documents"):
+                first_result = data["documents"][0]
+                latitude = float(first_result.get("y"))
+                longitude = float(first_result.get("x"))
+                return latitude, longitude
+    except Exception as e:
+        print(f"부분 지역명 검색 실패: {str(e)}")
+    
+    # 모든 검색 실패 시
+    print(f"위치를 찾을 수 없습니다: {location_name}")
+    return None, None
+
+@mcp.tool()
+def get_midpoint_facilities(geo1: str, geo2: str, facility_types: List[str] = None, radius: int = 1000) -> Dict:
+    """
+    두 지역 사이의 중간 지점을 찾고, 주변의 공공 시설(지하철역, 경찰서, 공공기관)을 검색합니다.
+    시설이 충분히 나오지 않을 경우 반경을 점진적으로 넓힙니다.
+    
+    Args:
+        geo1 (str): 첫 번째 지역 (예: '서울시 강남구')
+        geo2 (str): 두 번째 지역 (예: '서울시 송파구')
+        facility_types (List[str], 선택): 검색할 시설 유형 목록 (기본값: ['subway', 'police', 'public'])
+        radius (int, 선택): 초기 검색 반경 (미터), 기본값은 1000미터
+    
+    Returns:
+        Dict: 중간 지점 정보와 주변 시설 목록
+    """
+    try:
+        # 시작 시간 기록
+        start_time = time.time()
+        
+        # API 키 확인
+        if not KAKAO_API_KEY:
+            return {"error": "KAKAO_API_KEY가 설정되지 않았습니다."}
+        
+        # 기본 시설 유형 설정 - 공공 시설로 한정
+        if facility_types is None or len(facility_types) == 0:
+            facility_types = ["subway", "police", "public"]
+        
+        # 시설 타입 필터링 - 공공 시설만 유지
+        allowed_types = ["subway", "police", "public", "government", "institution"]
+        facility_types = [ft for ft in facility_types if ft.lower() in allowed_types]
+        
+        if not facility_types:
+            facility_types = ["subway", "police", "public"]
+        
+        # 위치 좌표 얻기 - 오류 처리 강화
+        try:
+            lat1, lon1 = get_coordinates_robust(geo1)
+            lat2, lon2 = get_coordinates_robust(geo2)
+            
+            if not (lat1 and lon1 and lat2 and lon2):
+                # 좌표를 얻지 못했을 경우 기본값 사용 (서울시 중심)
+                if not (lat1 and lon1):
+                    print(f"Warning: {geo1}의 좌표를 얻지 못했습니다. 기본값을 사용합니다.")
+                    lat1, lon1 = 37.5665, 126.9780  # 서울시 중심
+                if not (lat2 and lon2):
+                    print(f"Warning: {geo2}의 좌표를 얻지 못했습니다. 기본값을 사용합니다.")
+                    lat2, lon2 = 37.5665, 126.9780  # 서울시 중심
+                
+        except Exception as e:
+            # 에러 발생 시 대략적인 좌표 사용 (서울시 내 위치)
+            print(f"좌표 획득 중 오류: {str(e)}. 대략적인 좌표를 사용합니다.")
+            lat1, lon1 = 37.5665, 126.9780  # 서울시 중심
+            lat2, lon2 = 37.5665, 126.9780  # 서울시 중심
+        
+        # 중간 지점 계산
+        mid_lat, mid_lon = calculate_midpoint(lat1, lon1, lat2, lon2)
+        
+        # 주소 정보 가져오기 (실패 시 대체 텍스트 사용)
+        try:
+            address_info = get_address_from_coordinates(mid_lon, mid_lat)
+            if isinstance(address_info, dict) and "error" not in address_info:
+                address_string = f"행정구역: {address_info.get('region_1depth_name', '')} {address_info.get('region_2depth_name', '')} {address_info.get('region_3depth_name', '')}"
+            else:
+                # 두 지역명을 조합한 설명 사용
+                address_string = f"{geo1}와 {geo2} 사이의 중간 지점"
+        except Exception:
+            address_string = f"{geo1}와 {geo2} 사이의 중간 지점"
+        
+        # 시설 검색 - 반경을 점진적으로 늘리며 검색
+        all_facilities = []
+        max_execution_time = 15  # 최대 실행 시간 (초)
+        min_facilities_total = 3  # 최소 필요 시설 총 개수
+        max_radius = 10000  # 최대 검색 반경 (미터)
+        current_radius = radius  # 시작 반경
+        radius_increment = 1000  # 반경 증가량 (미터)
+        
+        # 시설 검색 전략 변경: 총 개수로 판단
+        while current_radius <= max_radius:
+            # 시간 초과 확인
+            if time.time() - start_time > max_execution_time:
+                break
+            
+            # 충분한 시설을 찾았는지 확인
+            if len(all_facilities) >= min_facilities_total:
+                break
+            
+            for facility_type in facility_types:
+                # 시간 초과 확인
+                if time.time() - start_time > max_execution_time:
+                    break
+                    
+                try:
+                    # 공공 시설에 맞는 키워드 사용
+                    search_keyword = facility_type
+                    if facility_type == "public":
+                        search_keyword = "공공기관"
+                    elif facility_type == "police":
+                        search_keyword = "경찰서"
+                    elif facility_type == "subway":
+                        search_keyword = "지하철역"
+                    
+                    new_facilities = find_nearby_facilities_robust(mid_lat, mid_lon, search_keyword, current_radius)
+                    
+                    # 이미 찾은 시설과 중복 제거
+                    for facility in new_facilities:
+                        is_duplicate = False
+                        for existing in all_facilities:
+                            if (existing.name == facility.name and 
+                                abs(existing.latitude - facility.latitude) < 0.0001 and 
+                                abs(existing.longitude - facility.longitude) < 0.0001):
+                                is_duplicate = True
+                                break
+                        
+                        if not is_duplicate:
+                            all_facilities.append(facility)
+                            
+                except Exception as e:
+                    print(f"시설 '{facility_type}' 검색 중 오류: {e}")
+            
+            # 반경 증가
+            current_radius += radius_increment
+        
+        # 거리순으로 정렬
+        all_facilities.sort(key=lambda x: x.distance)
+        
+        # 결과를 딕셔너리로 변환
+        midpoint = {
+            "name": address_string,
+            "latitude": mid_lat,
+            "longitude": mid_lon
+        }
+        
+        facilities_list = []
+        for facility in all_facilities:
+            facilities_list.append({
+                "name": facility.name,
+                "address": facility.address,
+                "category": facility.category,
+                "latitude": facility.latitude,
+                "longitude": facility.longitude,
+                "distance": facility.distance
+            })
+        
+        # 응답 구성
+        response_data = {
+            "midpoint": midpoint,
+            "facilities": facilities_list,
+            "initial_radius": radius,
+            "final_radius_used": current_radius - radius_increment if current_radius > radius else radius
+        }
+        
+        # 시설을 찾지 못한 경우에 대한 메시지 추가
+        if not facilities_list:
+            response_data["message"] = "검색 범위 내에서 시설을 찾지 못했습니다."
+        
+        return response_data
+    
+    except Exception as e:
+        return {"error": f"처리 중 오류가 발생했습니다: {str(e)}"}
+
 
 # 서버 시작 시 메시지 출력
 print("중고나라 크롤링 서버가 시작되었습니다.")
