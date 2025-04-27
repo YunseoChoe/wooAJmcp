@@ -207,21 +207,27 @@ def create_crawler_script():
     return path
 
 @mcp.tool()
-def search_joongna_items(keyword: str, page: int = 1) -> Dict:
-    """ 중고나라에서 검색어를 기반으로 상품을 검색하고 결과를 반환합니다. 
+def search_joongna_items(keyword: str, page: int = 1, max_price: Optional[int] = None) -> Dict:
+    """ 
+    중고나라에서 키워드로 상품 검색하고, max_price 이하로 필터링
     
     Args:
-        keyword (str): 검색할 키워드
-        page (int): 검색할 페이지 번호 (1부터 시작)
-        
+        keyword (str): 검색 키워드
+        page (int): 검색할 페이지 (기본값 1)
+        max_price (Optional[int]): 최대 허용 가격 (원 단위, 예: 500000)
+    
     Returns:
-        Dict: 검색 결과 (상품명, 가격, 이미지URL, 제품URL, 올린시간 등)
+        Dict: 검색 결과
     """
-    # 캐시에서 데이터 확인
+    # 캐시 확인
     cached_data = cache_manager.get(keyword, page)
     if cached_data:
         print(f"캐시된 데이터 사용: {keyword} - 페이지 {page}")
-        return cached_data
+        filtered_items = filter_items_by_price(cached_data['items'], max_price)
+        return {
+            **cached_data,
+            'items': filtered_items
+        }
     
     print(f"중고나라 크롤링 시작: {keyword} - 페이지 {page}")
     
@@ -229,24 +235,30 @@ def search_joongna_items(keyword: str, page: int = 1) -> Dict:
     script_path = create_crawler_script()
     
     try:
-        # 별도 프로세스로 크롤러 실행
         cmd = ['python', script_path, '--type', 'search', '--keyword', keyword, '--page', str(page)]
         process = subprocess.run(cmd, capture_output=True, text=True, check=True)
         
-        # 결과 파싱
         results = json.loads(process.stdout)
+
+        # 가격 필터 적용
+        filtered_items = filter_items_by_price(results, max_price)
         
-        # 응답 데이터 구성
         response_data = {
             'keyword': keyword,
             'page': page,
-            'total_items': len(results),
-            'has_more': len(results) > 0,  # 결과가 있으면 다음 페이지 존재 가능성
-            'items': results
+            'total_items': len(filtered_items),
+            'has_more': len(results) > 0,
+            'items': filtered_items
         }
         
-        # 캐시에 데이터 저장
-        cache_manager.set(keyword, page, response_data)
+        # 원본 결과를 캐시에 저장
+        cache_manager.set(keyword, page, {
+            'keyword': keyword,
+            'page': page,
+            'total_items': len(results),
+            'has_more': len(results) > 0,
+            'items': results
+        })
         
         return response_data
     
@@ -259,7 +271,7 @@ def search_joongna_items(keyword: str, page: int = 1) -> Dict:
             'total_items': 0,
             'has_more': False,
             'items': [],
-            'error': f"크롤링 중 오류가 발생했습니다: {e.stderr}"
+            'error': f"크롤링 중 오류: {e.stderr}"
         }
     except Exception as e:
         print(f"처리 중 오류 발생: {e}")
@@ -272,11 +284,27 @@ def search_joongna_items(keyword: str, page: int = 1) -> Dict:
             'error': str(e)
         }
     finally:
-        # 임시 파일 삭제
         try:
             os.remove(script_path)
         except:
             pass
+
+def filter_items_by_price(items: List[Dict], max_price: Optional[int]) -> List[Dict]:
+    """ 가격 기준으로 상품 필터링 """
+    if max_price is None:
+        return items
+    
+    filtered = []
+    for item in items:
+        price_text = item.get('price', '').replace(',', '').replace('원', '').strip()
+        try:
+            price_value = int(''.join(filter(str.isdigit, price_text)))
+            if price_value <= max_price:
+                filtered.append(item)
+        except:
+            pass  # 가격 파싱 실패하면 무시
+    
+    return filtered
 
 @mcp.tool()
 def get_joongna_product_detail(product_url: str) -> Dict:
